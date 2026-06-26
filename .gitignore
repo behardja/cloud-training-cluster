@@ -1,0 +1,21 @@
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+terraform/terraform.tfvars
+crash.log
+
+# Cluster run state written by create_cluster.sh
+**/.vtc_cluster_state
+
+# Rendered request bodies / job outputs
+*.out
+/tmp/vtc_*.json
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.pyc

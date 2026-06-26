@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars and edit. Everything about the cluster shape
+# (machine types, accelerators, fallback order, Gemma recipe) lives in
+# ../configs/cluster_config.yaml — NOT here. Minimum: set project_id (or set it
+# in that YAML and leave this blank).
+
+project_id = "your-project"
+# region   = "us-central1"
+
+# --- Feature gates (safe defaults shown) -------------------------------------
+# A first apply provisions only the supporting infra (APIs, PSA, Filestore,
+# bucket). Flip this on to actually create the cluster (walks the fallback chain):
+# create_cluster = true
+
+# Override the auto-derived cluster id (<= 10 chars, unique):
+# cluster_id = "vtcgemma"
+
+# Try only a subset of the fallback chain, in order. CPU is the validated path today
+# (no A3/A4 GPU quota yet); mirrors the notebook's MODE=cpu:
+# profiles = "cpu"
+# profiles = "a4b200,cpu"   # GPU-then-CPU fallback (once you have A3/A4 quota)

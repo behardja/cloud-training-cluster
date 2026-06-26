@@ -1,0 +1,52 @@
+project:
+  id: sandbox-401718
+  region: us-east4
+  zone: us-east4-a
+network:
+  vpc: beusebio-network
+  subnet: beusebio-network
+  psa_prefix_length: 20
+filestore:
+  instance_id: filestore-test
+  share_name: vol1
+  tier: BASIC_HDD
+  capacity: 1TB
+bucket:
+  name: ''
+login_node:
+  machine_type: n2-standard-8
+  boot_disk_type: pd-standard
+  boot_disk_size_gb: 100
+fallback_chain:
+- name: a4b200
+  accelerator: gpu
+  orchestrator: slurm
+  machine_type: a4-highgpu-8g
+  accelerator_type: NVIDIA_B200
+  accelerator_count: 8
+  node_count: 2
+- name: a3h100
+  accelerator: gpu
+  orchestrator: slurm
+  machine_type: a3-megagpu-8g
+  accelerator_type: NVIDIA_H100_MEGA_80GB
+  accelerator_count: 8
+  node_count: 1
+  # On-demand (shared capacity) — no reservation. Needs NVIDIA_H100_MEGA on-demand quota.
+  # To instead GUARANTEE capacity, add: reservation: <name>  (run notebooks/00 to create it).
+- name: cpu
+  accelerator: cpu
+  orchestrator: slurm
+  machine_type: n2-standard-16
+  node_count: 2
+workload:
+  model: gemma4-4b
+  task: pretrain
+  gpu:
+    framework: nemo
+    recipe: recipes/pretrain/gemma4_4b_pt.py
+    slurm_type: hcc-a4
+  tpu:
+    framework: maxtext
+    recipe: MaxText/configs/gemma4-4b.yml
+  data_dir: /gcs/your-bucket/dataset
