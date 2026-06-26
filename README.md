@@ -80,6 +80,17 @@ gcloud storage cp -r <path-to>/maxtext gs://<project>-vtc-temp/maxtext/
 
 `scripts/jobs/launch_gemma.sh` pulls it onto the login node and runs the recipe named in `workload` — NeMo `run.py` for GPU, MaxText `train.py` for TPU.
 
+## Smoke-test the training stack (mock data)
+
+Before wiring a real dataset, prove the **GPU + NeMo + Slurm** path runs end-to-end on **random tokens** — the "SparkPi" of the training stack. No bucket, no dataset, no external recipe:
+
+```bash
+# on the login node
+bash launch_gemma.sh --accelerator gpu --mock-data --nodes 1 --gpus-per-node 8
+```
+
+This runs the real Gemma **pre-training** code (`scripts/jobs/gemma_mock_pretrain.py`, NeMo `MockDataModule`) for a few steps. It exercises the model, optimizer, and parallelism but **learns nothing** — the weights are throwaway; it's a workload dummy, not a real or tuned model. Needs A3/A4 GPU capacity; on a CPU cluster the launcher no-ops. For a real run, drop `--mock-data` and pass `--bucket`/`--recipe`/`--data-dir`.
+
 ## Prerequisites
 
 IAM + tooling to provision and reach VTC:
@@ -100,7 +111,8 @@ IAM + tooling to provision and reach VTC:
 │   ├── delete_cluster.sh        : Delete the cluster (reads .vtc_cluster_state or --cluster-id).
 │   └── jobs/
 │       ├── cpu_smoke_test.sh    : SBATCH smoke test — places a job on a worker, writes to /home.
-│       └── launch_gemma.sh      : Launch Gemma — NeMo (GPU/Slurm) or MaxText (TPU/GKE).
+│       ├── launch_gemma.sh      : Launch Gemma — real (--data-dir) or --mock-data; NeMo (GPU) / MaxText (TPU).
+│       └── gemma_mock_pretrain.py : Mock-data smoke test — real Gemma pretrain code on random tokens (NeMo).
 ├── terraform/
 │   ├── main.tf                  : yamldecode the contract; resolve project/region/storage.
 │   ├── apis.tf                  : Enable the required APIs.

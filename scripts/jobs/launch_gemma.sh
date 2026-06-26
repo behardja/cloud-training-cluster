@@ -2,17 +2,23 @@
 # =============================================================================
 # Launch the Gemma training recipe on the VTC login node (PDF Step 4.6).
 # =============================================================================
-# Run this ON the login node after SSHing in. It stages the training code from
-# the code-transfer bucket and kicks off the recipe named in cluster_config.yaml.
-# GPU clusters launch via NeMo-Run (Slurm); TPU clusters via a JAX/MaxText recipe
-# (GKE, Preview). Pass the values from your config as flags or env vars.
+# Run this ON the login node after SSHing in. GPU clusters launch via NeMo-Run
+# (Slurm); TPU clusters via a JAX/MaxText recipe (GKE, Preview).
 #
-# Usage (GPU example):
-#   launch_gemma.sh --accelerator gpu \
-#       --bucket gs://<project>-vtc-temp \
-#       --recipe recipes/pretrain/gemma4_4b_pt.py \
-#       --slurm-type hcc-a4 \
+# Two modes:
+#   real  : stage your NeMo/MaxText tree from the bucket, train on --data-dir.
+#   mock  : --mock-data — run the REAL training code on RANDOM tokens (NeMo
+#           MockDataModule). The "SparkPi" of the training stack: it exercises
+#           the model + optimizer + parallelism end-to-end but learns nothing.
+#           No bucket, no dataset, no external recipe needed (GPU).
+#
+# Usage:
+#   # real GPU run
+#   launch_gemma.sh --accelerator gpu --bucket gs://<project>-vtc-temp \
+#       --recipe recipes/pretrain/gemma4_4b_pt.py --slurm-type hcc-a4 \
 #       --data-dir /gcs/your-bucket/dataset
+#   # mock smoke test (no data)
+#   launch_gemma.sh --accelerator gpu --mock-data --nodes 1 --gpus-per-node 8
 set -euo pipefail
 
 ACCEL="gpu"
@@ -21,23 +27,107 @@ RECIPE=""
 SLURM_TYPE="hcc-a4"
 DATA_DIR=""
 WORK_DIR="${HOME}/my_training_run"
+MOCK=0
+NODES=1
+GPUS=8
+STEPS=20
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --accelerator) ACCEL="$2"; shift 2;;
-    --bucket)      BUCKET="$2"; shift 2;;
-    --recipe)      RECIPE="$2"; shift 2;;
-    --slurm-type)  SLURM_TYPE="$2"; shift 2;;
-    --data-dir)    DATA_DIR="$2"; shift 2;;
-    --work-dir)    WORK_DIR="$2"; shift 2;;
+    --accelerator)   ACCEL="$2"; shift 2;;
+    --bucket)        BUCKET="$2"; shift 2;;
+    --recipe)        RECIPE="$2"; shift 2;;
+    --slurm-type)    SLURM_TYPE="$2"; shift 2;;
+    --data-dir)      DATA_DIR="$2"; shift 2;;
+    --work-dir)      WORK_DIR="$2"; shift 2;;
+    --mock-data)     MOCK=1; shift;;
+    --nodes)         NODES="$2"; shift 2;;
+    --gpus-per-node) GPUS="$2"; shift 2;;
+    --steps)         STEPS="$2"; shift 2;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
 
-[[ -n "$BUCKET" && -n "$RECIPE" && -n "$DATA_DIR" ]] || {
-  echo "ERROR: --bucket, --recipe and --data-dir are required" >&2; exit 2; }
-
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$WORK_DIR"
+
+# CPU profile carries no training fabric — it's for plumbing validation only.
+if [[ "$ACCEL" != "gpu" && "$ACCEL" != "tpu" ]]; then
+  echo "==> '${ACCEL}' is not a training fabric (cpu fallback?). Skipping launch." >&2
+  echo "    The cpu profile validates plumbing only — run scripts/jobs/cpu_smoke_test.sh."
+  exit 0
+fi
+
+# =============================================================================
+# MOCK MODE — real training code, random tokens (no dataset / no bucket on GPU)
+# =============================================================================
+if [[ "$MOCK" -eq 1 ]]; then
+  if [[ "$ACCEL" == "gpu" ]]; then
+    # Prefer the canonical recipe if it was staged next to this script;
+    # otherwise write a self-contained copy so single-file staging still works.
+    MOCK_RECIPE="${SCRIPT_DIR}/gemma_mock_pretrain.py"
+    if [[ ! -f "$MOCK_RECIPE" ]]; then
+      MOCK_RECIPE="${WORK_DIR}/gemma_mock_pretrain.py"
+      cat > "$MOCK_RECIPE" <<'PYEOF'
+#!/usr/bin/env python3
+"""Gemma mock-data smoke test (NeMo) — real training code on random tokens."""
+import argparse
+import nemo_run as run
+from nemo.collections import llm
+
+
+def build_recipe(nodes, gpus, steps, work_dir):
+    recipe = llm.gemma2_2b.pretrain_recipe(
+        dir=work_dir, name="gemma_mock",
+        num_nodes=nodes, num_gpus_per_node=gpus,
+    )
+    # the dummy workload: random tokens instead of a real corpus
+    recipe.data = run.Config(
+        llm.MockDataModule,
+        seq_length=4096, global_batch_size=8, micro_batch_size=1,
+    )
+    recipe.trainer.max_steps = steps
+    recipe.trainer.val_check_interval = steps
+    recipe.trainer.limit_val_batches = 2
+    recipe.log.ckpt = None
+    return recipe
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--nodes", type=int, default=1)
+    ap.add_argument("--gpus-per-node", type=int, default=8)
+    ap.add_argument("--steps", type=int, default=20)
+    ap.add_argument("--work-dir", default="./gemma_mock_run")
+    a = ap.parse_args()
+    recipe = build_recipe(a.nodes, a.gpus_per_node, a.steps, a.work_dir)
+    run.run(recipe, executor=run.LocalExecutor(ntasks_per_node=a.gpus_per_node))
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+    fi
+    echo "==> MOCK: training Gemma on random tokens (NeMo MockDataModule) — proves the GPU path, learns nothing"
+    python3 "$MOCK_RECIPE" --nodes "$NODES" --gpus-per-node "$GPUS" --steps "$STEPS" --work-dir "$WORK_DIR"
+  else
+    # TPU: MaxText ships a synthetic-data mode (dataset_type=synthetic).
+    [[ -n "$BUCKET" && -n "$RECIPE" ]] || {
+      echo "ERROR: --bucket and --recipe are required for a tpu mock run" >&2; exit 2; }
+    echo "==> staging MaxText from ${BUCKET}/maxtext"
+    mkdir -p "${HOME}/maxtext"; gsutil -m cp -r "${BUCKET}/maxtext/*" "${HOME}/maxtext/"; cd "${HOME}/maxtext"
+    echo "==> MOCK: Gemma on TPU via MaxText synthetic data"
+    python3 MaxText/train.py "${RECIPE}" base_output_directory="${WORK_DIR}" dataset_type=synthetic
+  fi
+  echo "==> mock job submitted. Monitor: squeue ; sinfo ; sacct   (logs in ${WORK_DIR})"
+  exit 0
+fi
+
+# =============================================================================
+# REAL MODE — train on a real dataset staged to the code-transfer bucket
+# =============================================================================
+[[ -n "$BUCKET" && -n "$RECIPE" && -n "$DATA_DIR" ]] || {
+  echo "ERROR: --bucket, --recipe and --data-dir are required (or use --mock-data)" >&2; exit 2; }
 
 if [[ "$ACCEL" == "gpu" ]]; then
   # NeMo-Run on Slurm. The nemo/ tree is staged to the code-transfer bucket
@@ -52,7 +142,7 @@ if [[ "$ACCEL" == "gpu" ]]; then
     -d "${WORK_DIR}" \
     -s "${RECIPE}" \
     --data-dir "${DATA_DIR}"
-elif [[ "$ACCEL" == "tpu" ]]; then
+else
   # JAX/MaxText on the GKE orchestrator (Preview). The exact launcher depends on
   # the MaxText image you stage; this is the canonical training entrypoint.
   echo "==> staging MaxText from ${BUCKET}/maxtext"
@@ -63,10 +153,6 @@ elif [[ "$ACCEL" == "tpu" ]]; then
   python3 MaxText/train.py "${RECIPE}" \
     base_output_directory="${WORK_DIR}" \
     dataset_path="${DATA_DIR}"
-else
-  echo "==> '${ACCEL}' is not a training fabric (cpu fallback?). Skipping launch." >&2
-  echo "    The cpu profile is for plumbing validation only — run scripts/jobs/cpu_smoke_test.sh."
-  exit 0
 fi
 
 echo "==> submitted. Monitor with: squeue ; sinfo ; sacct   (logs in ${WORK_DIR})"

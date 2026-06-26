@@ -32,6 +32,7 @@ output "next_steps" {
       2. Find the login node IP (Vertex AI > Training > Model Development Clusters)
          and SSH in:  gcloud compute ssh <cluster-id>-login-001 --zone ${local.zone}
       3. Validate Slurm (sinfo / squeue) then launch Gemma — see notebooks/02-run-training.ipynb
+         GPU smoke test (no dataset): bash launch_gemma.sh --accelerator gpu --mock-data
       4. TPU profiles are Preview (GKE orchestrator) and need allowlisting — see README.
   EOT
 }
