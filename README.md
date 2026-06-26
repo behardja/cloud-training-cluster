@@ -96,7 +96,11 @@ This runs the real Gemma **pre-training** code (`scripts/jobs/gemma_mock_pretrai
 IAM + tooling to provision and reach VTC:
 - IAM: Vertex AI Administrator, Filestore Editor, Compute Network Admin, Storage Admin, **Compute OS Login** (for login-node SSH). See `IAM-PLAN.md` for the full set as Terraform.
 - VTC allowlisting (Preview); **A3/A4 GPU quota** for GPU clusters (this project has none yet → CPU works today).
-- An existing VPC + subnet in `project.region`.
+- An existing VPC + subnet in `project.region`, with **Private Google Access enabled on the subnet** (VTC nodes have no external IPs; without it, cluster creation fails with *"Subnetwork does not allow private IP Google access"*). Enable it once:
+  ```bash
+  gcloud compute networks subnets update <subnet> --region=<region> --enable-private-ip-google-access
+  ```
+  (Path A surfaces this as a Terraform `check` before apply.)
 - Local tooling: `gcloud` (with Application Default Credentials), `python3` + `PyYAML`, and `terraform` for Path A.
 
 ## Repo layout

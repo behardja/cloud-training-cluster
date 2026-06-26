@@ -82,6 +82,34 @@ echo "==> fallback chain: ${CHAIN[*]}"
 
 API="https://${REGION}-aiplatform.googleapis.com/v1beta1/projects/${PROJECT_ID}/locations/${REGION}"
 
+# A create that is ACCEPTED then fails (LRO error / timeout) leaves a registered
+# cluster object behind. Since the whole chain reuses one CLUSTER_ID, that ghost
+# makes every later profile fail with ALREADY_EXISTS. Delete it before moving on.
+# Only called from the paths where WE created it — never on a synchronous reject
+# (which may be a pre-existing cluster we must not touch).
+_delete_failed_cluster() {
+  local token; token="$(gcloud auth print-access-token)"
+  local dresp; dresp="$(curl -s -X DELETE -H "Authorization: Bearer ${token}" \
+    "${API}/modelDevelopmentClusters/${CLUSTER_ID}")"
+  local dop; dop="$(printf '%s' "$dresp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("name",""))' 2>/dev/null || true)"
+  if [[ -z "$dop" ]]; then
+    echo "    cleanup: nothing to delete for '${CLUSTER_ID}'."
+    return 0
+  fi
+  echo "    cleanup: deleting failed cluster '${CLUSTER_ID}' so the id frees for the next profile..."
+  local w=0
+  while (( w < 300 )); do
+    sleep "$POLL_INTERVAL"; w=$((w + POLL_INTERVAL))
+    local t2; t2="$(gcloud auth print-access-token)"
+    local dstat; dstat="$(curl -s -H "Authorization: Bearer ${t2}" \
+      "https://${REGION}-aiplatform.googleapis.com/v1beta1/${dop}")"
+    local d; d="$(printf '%s' "$dstat" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("done", False))' 2>/dev/null || echo False)"
+    [[ "$d" == "True" ]] && { echo "    cleanup: deleted."; return 0; }
+  done
+  echo "    cleanup: delete still pending after 300s (continuing anyway)."
+  return 0
+}
+
 try_profile() {  # try_profile <profile-name> ; returns 0 on success
   local profile="$1"
   local body; body="$(mktemp /tmp/vtc_${profile}.XXXX.json)"
@@ -119,6 +147,7 @@ try_profile() {  # try_profile <profile-name> ; returns 0 on success
     local err;   err="$(printf '%s' "$ostat" | python3 -c 'import sys,json; print("error" in json.load(sys.stdin))' 2>/dev/null || echo False)"
     if [[ "$done_" == "True" && "$err" == "True" ]]; then
       echo "    profile '$profile' FAILED to provision:"; printf '%s\n' "$ostat" | python3 -c 'import sys,json; print("      "+json.dumps(json.load(sys.stdin).get("error",{}),indent=2))' 2>/dev/null || true
+      _delete_failed_cluster   # remove the registered-but-failed cluster so the id frees up
       return 1
     elif [[ "$done_" == "True" ]]; then
       echo "    profile '$profile' is UP."
@@ -127,6 +156,7 @@ try_profile() {  # try_profile <profile-name> ; returns 0 on success
     echo "    ... still provisioning ($waited/${POLL_TIMEOUT}s)"
   done
   echo "    timed out waiting on '$profile' after ${POLL_TIMEOUT}s — treating as failed."
+  _delete_failed_cluster   # remove the registered-but-failed cluster so the id frees up
   return 1
 }
 

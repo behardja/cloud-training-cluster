@@ -28,9 +28,12 @@ SLURM_TYPE="hcc-a4"
 DATA_DIR=""
 WORK_DIR="${HOME}/my_training_run"
 MOCK=0
+GPU_TEST=0
 NODES=1
 GPUS=8
 STEPS=20
+PARTITION="a3h100"                                          # Slurm partition = winning profile name
+TEST_IMAGE="pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime"  # public PyTorch image for --gpu-test
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,9 +44,12 @@ while [[ $# -gt 0 ]]; do
     --data-dir)      DATA_DIR="$2"; shift 2;;
     --work-dir)      WORK_DIR="$2"; shift 2;;
     --mock-data)     MOCK=1; shift;;
+    --gpu-test)      GPU_TEST=1; shift;;
     --nodes)         NODES="$2"; shift 2;;
     --gpus-per-node) GPUS="$2"; shift 2;;
     --steps)         STEPS="$2"; shift 2;;
+    --partition)     PARTITION="$2"; shift 2;;
+    --test-image)    TEST_IMAGE="$2"; shift 2;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -59,7 +65,28 @@ if [[ "$ACCEL" != "gpu" && "$ACCEL" != "tpu" ]]; then
 fi
 
 # =============================================================================
+# GPU TEST — framework-free multi-GPU smoke test, the reliable "SparkPi".
+# Runs bf16 matmul + NCCL all-reduce on all GPUs inside a public PyTorch
+# container, submitted to the Slurm partition. No NeMo/dataset needed.
+# =============================================================================
+if [[ "$GPU_TEST" -eq 1 ]]; then
+  TEST_RECIPE="${SCRIPT_DIR}/gpu_burn.py"
+  [[ -f "$TEST_RECIPE" ]] || { echo "ERROR: gpu_burn.py must sit next to this script" >&2; exit 2; }
+  echo "==> GPU TEST: bf16 matmul + NCCL all-reduce on ${GPUS} GPU(s)"
+  echo "    partition='${PARTITION}'  container='${TEST_IMAGE}'  (first run pulls the image — a few min)"
+  srun --partition="${PARTITION}" --nodes="${NODES}" --ntasks-per-node=1 \
+       --gpus-per-node="${GPUS}" --time=00:15:00 \
+       --container-image="${TEST_IMAGE}" --container-mounts="${HOME}:${HOME}" \
+       bash -lc "cd '${HOME}' && torchrun --standalone --nproc_per_node=${GPUS} gpu_burn.py"
+  echo "==> GPU test finished (see output above)."
+  exit $?
+fi
+
+# =============================================================================
 # MOCK MODE — real training code, random tokens (no dataset / no bucket on GPU)
+# NOTE: NeMo is NOT on the login node; real NeMo runs inside the GEAP prebuilt
+# container via vertex-oss-training run.py. This bare-python path is a stub kept
+# for reference — use --gpu-test for a runnable GPU smoke test today.
 # =============================================================================
 if [[ "$MOCK" -eq 1 ]]; then
   if [[ "$ACCEL" == "gpu" ]]; then
